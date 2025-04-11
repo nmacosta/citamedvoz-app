@@ -454,23 +454,66 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             st.warning("Formato inesperado para Medicinas en el JSON.")
                             st.json(medicamentos_data)
 
-                    # SECCION: Plan de Acción
+                    # SECCION: Plan de Acción (CORREGIDA - Lista Numerada)
                     with st.expander("Plan de Acción"):
                         plan_data = informacion_medica.get("PlanDeAccion", [])
+
                         if isinstance(plan_data, list):
                             if plan_data:
+                                items_markdown = [] # Lista para guardar los strings formateados
+                                valid_items_found = False
                                 for item_dict in plan_data:
-                                    if isinstance(item_dict, dict) and item_dict:
-                                        plan_item_text = list(item_dict.values())[0]
-                                        st.markdown(f"- {plan_item_text}")
+                                    if isinstance(item_dict, dict) and len(item_dict) == 1:
+                                        # Extraer la clave (número) y el valor (instrucción)
+                                        # Asumiendo que solo hay una clave-valor por diccionario
+                                        try:
+                                            numero_consecutivo = list(item_dict.keys())[0]
+                                            instruccion = list(item_dict.values())[0]
+
+                                            # Validar que la clave sea (o parezca) un número
+                                            try:
+                                                num_val = int(numero_consecutivo)
+                                                # Formatear como ítem de lista numerada markdown
+                                                # IMPORTANTE: Usar el número como prefijo seguido de un punto y espacio
+                                                items_markdown.append(f"{num_val}. {instruccion}")
+                                                valid_items_found = True
+                                            except ValueError:
+                                                # Si la clave no es un número, usar bullet point como fallback
+                                                # y añadirlo directamente a la salida, no a la lista numerada
+                                                st.warning(f"Ítem en PlanDeAccion con clave no numérica: '{numero_consecutivo}'. Mostrando como texto:")
+                                                st.markdown(f"- {instruccion}")
+
+
+                                        except IndexError:
+                                            # Diccionario vacío, ignorar o marcar
+                                            st.warning("Se encontró un diccionario vacío en PlanDeAccion.")
                                     else:
-                                        st.warning(f"Elemento inesperado en PlanDeAccion: {item_dict}")
+                                        # Manejar si un elemento no es el diccionario esperado
+                                        st.warning(f"Elemento inesperado en PlanDeAccion (no es dict de 1 elemento): {item_dict}. Mostrando como texto:")
+                                        # Intentar mostrar el valor si es un string simple
+                                        if isinstance(item_dict, str):
+                                            st.markdown(f"- {item_dict}")
+                                        elif isinstance(item_dict, dict): # Si es dict pero > 1 elemento
+                                            st.markdown(f"- {item_dict}") # Mostrar dict como texto
+
+                                # Unir todos los ítems formateados numéricamente en una sola cadena de markdown
+                                if valid_items_found:
+                                    st.markdown("\n".join(items_markdown))
+                                elif not plan_data: # Si la lista original estaba vacía
+                                    st.info("No se especificó plan de acción en el JSON (lista vacía).")
+                                else: # Si la lista tenía datos pero ninguno era válido para numerar
+                                    st.info("No se encontraron instrucciones numeradas válidas en PlanDeAccion. Se mostraron advertencias arriba si hubo ítems con formato inesperado.")
                             else:
                                 st.info("No se especificó plan de acción en el JSON (lista vacía).")
-                        elif isinstance(plan_data, str) and plan_data: # Fallback por si acaso
-                            st.markdown(f"- {plan_data}")
+                        # Mantener el fallback por si el formato no es una lista
+                        elif isinstance(plan_data, str) and plan_data:
+                            st.markdown(f"Plan: {plan_data}") # Mostrar como texto simple si es string
                         else:
-                            st.info("No se especificó plan de acción en el JSON.")
+                            st.warning("Formato inesperado para PlanDeAccion o está vacío.")
+                            # Opcional: mostrar el formato inesperado si no es lista ni string
+                            if not isinstance(plan_data, (list, str)):
+                                st.json(plan_data)
+
 
                     # SECCION: Días de Reposo
                     with st.expander("Indicación de Reposo"):
