@@ -6,6 +6,9 @@ import pathlib
 import io # Necesario para manejar el archivo en memoria
 from datetime import datetime
 import pytz # Necesario si quieres mantener la hora local
+import tempfile 
+import os 
+
 
 # --- 0. Configuración Inicial y Constantes ---
 st.set_page_config(layout="wide", page_title="Audio Médico a JSON")
@@ -69,10 +72,10 @@ json_structure_example = '''
 prompt_part3_final_instructions = """
 Instrucciones IMPORTANTES para el formato de salida:
 No incluyas texto explicativo, saludos, respeta las categorias y la forma en que se desglozan en el ejemplo.
+Para Diagnosticos, es necesario que busque el CIED_10 al que corresponde e incluyas en el atributo ID
 Si una pieza específica de información (ej. Signos Vitales - FC) no se menciona explícitamente en el audio, utiliza la cadena NO_ENCONTRADO
 Presta atencion durante el audio el transcurao del audio se mencionan varios diagnosticos/patologias del paciente.
 Si encuentras en el audio algun examen de laboratorio con el valor que le corresponde al resultado, incluye el simbolo de medida que corresponde
-Los diagnosticos colocar al lado del texto entre parentesis a que codigo CIED_10 Pertenecen
 Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspondientes vacías: [].
 El campo LITERAL es crucial: debe contener la transcripción LITERAL del audio.
 El campo MOTIVO_CONSULTA es importante: debe contener las razones porque el paciente asiste a consulta, no excluyas el preambulo que incluye el medico a las razones.
@@ -127,20 +130,26 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
         generation_successful = False
         response = None
         parsed_json = None
-        json_display_placeholder = st.empty() # Para mostrar el JSON final o errores
+        json_display_placeholder = st.empty()
+        temp_file_path = None # Para guardar la ruta del archivo temporal
 
         try:
-            # --- 3.1. Subir archivo a Google AI ---
-            with st.spinner(f"Subiendo '{uploaded_file.name}' a Google AI..."):
+            # --- 3.1. Guardar archivo subido a un archivo temporal y subir a Google AI ---
+            with st.spinner(f"Preparando y subiendo '{uploaded_file.name}' a Google AI..."):
                 upload_start_time = time.time()
                 try:
-                    # Usar getvalue() para leer los bytes del archivo subido en memoria
-                    audio_bytes = uploaded_file.getvalue()
+                    # Crear un archivo temporal con el mismo sufijo (extensión)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_file:
+                        temp_file.write(uploaded_file.getvalue()) # Escribir los bytes al archivo temporal
+                        temp_file_path = temp_file.name # Obtener la ruta del archivo temporal
+
+                    st.write(f"Archivo temporal creado en: {temp_file_path}")
+
+                    # Ahora subir usando la ruta (path)
                     audio_file_ref = genai.upload_file(
-                        # Usamos un nombre único basado en el tiempo para evitar colisiones
+                        path=temp_file_path, # <--- Usar path
                         display_name=f"streamlit_{int(time.time())}_{uploaded_file.name}",
-                        file_contents=audio_bytes,
-                        mime_type="audio/ogg" # Asegúrate que el mime type sea correcto
+                        mime_type="audio/ogg" # Especificar mime type es bueno
                     )
                     st.write(f"Archivo enviado a Google AI. Nombre de referencia: {audio_file_ref.name}. Esperando procesamiento...")
 
@@ -180,7 +189,7 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                 with st.spinner("Preparando modelo y generando contenido (puede tardar varios minutos)..."):
                     try:
                         #model_name = 'gemini-1.5-pro-latest' # Puedes elegir el modelo
-                        model_name = 'gemini-1.5-flash-latest' # O usar flash que es más rápido y barato
+                        model_name = 'gemini-2.5-pro-exp-03-25' # O usar flash que es más rápido y barato
                         model = genai.GenerativeModel(model_name)
                         st.write(f"Usando modelo: {model_name}")
 
@@ -256,9 +265,14 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                         try:
                             parsed_json = json.loads(json_block)
                             st.success("JSON extraído y validado exitosamente.")
-                            # Mostrar el JSON formateado para depuración (opcional)
-                            # with json_display_placeholder.expander("Ver JSON Generado", expanded=False):
-                            #      st.json(parsed_json)
+                            
+                            # --- INICIO: NUEVA SECCIÓN PARA MOSTRAR JSON COMPLETO ---
+                            st.divider() # Separador visual
+                            st.subheader("JSON Completo Recibido del Modelo")
+                            with st.expander("Ver/Ocultar JSON completo", expanded=False): # Ponerlo en un expander por defecto cerrado
+                                st.json(parsed_json, expanded=True) # 'expanded=True' dentro del expander para el widget json en sí
+                            st.divider() # Otro separador visual
+                            # --- FIN: NUEVA SECCIÓN ---
 
                         except json.JSONDecodeError as json_error:
                             st.error(f"Error: El texto extraído NO es un JSON válido.")
@@ -395,9 +409,20 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if diagnosticos_data:
                                 for diag_dict in diagnosticos_data:
                                     if isinstance(diag_dict, dict):
+                                        # --- OBTENER AMBOS CAMPOS ---
                                         nombre_diag = diag_dict.get("Nombre", "Nombre no especificado")
-                                        # Asume que el ID (CIE10) ya está en el nombre como "(CIE10_CODE)"
-                                        st.markdown(f"- {nombre_diag}")
+                                        diag_id = diag_dict.get("ID", "") # Obtener el ID, default a vacío si no existe
+
+                                        # --- CONSTRUIR EL TEXTO A MOSTRAR ---
+                                        display_text = f"- **{nombre_diag}**" # Empezar con el nombre en negrita
+
+                                        # Añadir el ID solo si existe, no está vacío y no es "NO_ENCONTRADO"
+                                        if diag_id and diag_id.strip() and diag_id.upper() != "NO_ENCONTRADO":
+                                            display_text += f" (ID: {diag_id})"
+
+                                        # Mostrar el texto combinado
+                                        st.markdown(display_text)
+                                        # --- FIN DE LA CORRECCIÓN ---
                                     else:
                                         st.warning(f"Elemento inesperado en Diagnosticos: {diag_dict}")
                             else:
