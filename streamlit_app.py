@@ -75,11 +75,12 @@ No incluyas texto explicativo, saludos, respeta las categorias y la forma en que
 Para Diagnosticos, es necesario que busque el CIED_10 al que corresponde e incluyas en el atributo ID
 Presta atencion durante el audio el transcurao del audio se mencionan varios diagnosticos/patologias del paciente.
 Si encuentras en el audio algun examen de laboratorio con el valor que le corresponde al resultado, busca el simbolo o la unidad de medida que corresponde
-Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspondientes vacías: [].
+En los examenes es necesario identificar si son examenes ya con resultado por el paciente o si son examenes solictados
 El campo LITERAL es crucial: debe contener la transcripción LITERAL del audio.
 El campo MOTIVO_CONSULTA es importante: debe contener las razones porque el paciente asiste a consulta, no excluyas el preambulo que incluye el medico a las razones.
 Presta atención a los tipos de datos esperados (números para signos vitales, cadenas para descripciones, listas para exámenes/diagnósticos/medicamentos).
 Si una pieza específica de información (ej. Signos Vitales - FC) no se menciona explícitamente en el audio, utiliza la cadena NO_ENCONTRADO
+Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspondientes vacías: [].
 """
 # Combinar el prompt
 prompt_text = prompt_part1 + json_structure_example + prompt_part3_final_instructions
