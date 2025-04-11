@@ -11,8 +11,8 @@ import os
 
 
 # --- 0. Configuración Inicial y Constantes ---
-st.set_page_config(layout="wide", page_title="Audio Médico a JSON")
-st.title("Procesador de Audio Médico con IA Generativa")
+st.set_page_config(layout="wide", page_title="citamedVOZ")
+st.title("CITAMED - Procesador de Audio Médico con IA Generativa")
 
 # Define el prompt directamente aquí (combinado de Colab)
 # Parte 1: Instrucciones iniciales
