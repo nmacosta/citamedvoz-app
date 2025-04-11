@@ -3,103 +3,125 @@ import re
 import ast # Para evaluar de forma segura literales como listas/diccionarios
 
 # --- Función para Parsear la Salida del LLM ---
+# --- Función para Parsear la Salida del LLM (Versión Más Robusta) ---
 def parse_llm_output_to_dict(raw_text):
     """
     Parsea el texto crudo con formato [CLAVE]: VALOR... del LLM
-    a un diccionario Python, optimizado para el formato de ejemplo.
+    a un diccionario Python, con fallback para listas si ast falla.
     """
     informacion_extraida = {}
     lines = raw_text.strip().split('\n')
     current_key = None
     current_value = ""
-    print("--- Iniciando Parseo Línea por Línea ---") # Debug en consola
+    print("--- Iniciando Parseo Línea por Línea (v2) ---") # Debug
 
     for line in lines:
         line_stripped = line.strip()
-        # Ignorar líneas completamente vacías entre bloques, pero permitir indentación
-        if not line_stripped and current_key is None:
-             continue
-        # Permitir líneas vacías *dentro* de un valor multilínea
+        if not line_stripped and current_key is None: continue
         if not line_stripped and current_key is not None:
-            current_value += "\n" # Preservar el salto de línea
+            # Si es línea vacía dentro de valor, añadirla (importante para ast)
+            current_value += "\n"
             continue
 
-        # Busca una clave como [ALGOCLAVE]: al inicio de la línea
         match = re.match(r'^\[([^\]]+)\]:(.*)', line_stripped)
 
         if match:
             key = match.group(1).strip()
-            # Valor inicial en la misma línea (puede estar vacío)
             value_part = match.group(2).strip()
             print(f"Línea con Clave: '{key}', Valor inicial: '{value_part}'") # Debug
-
-            # Guardar clave anterior si existe
             if current_key:
                  informacion_extraida[current_key] = current_value.strip()
                  print(f"  Guardando Clave Anterior: '{current_key}' = '{current_value.strip()[:50]}...'") # Debug
-
             current_key = key
-            current_value = value_part # Empezar con el valor de la misma línea
-        elif current_key: # Si no es una línea de clave nueva y ya tenemos una clave activa
-            # Añadir esta línea (con su indentación original) al valor actual
-            # Añadir \n si current_value no está vacío (para separar líneas)
+            current_value = value_part
+        elif current_key:
             separator = "\n" if current_value else ""
-            current_value += separator + line # Usar línea original para preservar formato interno
+            current_value += separator + line # Usar línea original
             print(f"  Añadiendo a '{current_key}': '{line[:50]}...'") # Debug
         else:
-             print(f"Línea Ignorada (antes de primera clave): '{line[:50]}...'") # Debug
+             print(f"Línea Ignorada: '{line[:50]}...'") # Debug
 
-    # Guardar la última clave-valor
     if current_key:
         informacion_extraida[current_key] = current_value.strip()
         print(f"Guardando Última Clave: '{current_key}' = '{current_value.strip()[:50]}...'") # Debug
 
-    print("--- Parseo Inicial Completado ---") # Debug
-    print(f"Diccionario Inicial: { {k: str(v)[:50]+'...' for k,v in informacion_extraida.items()} }") # Debug
+    print("--- Parseo Inicial Completado (v2) ---") # Debug
 
-    # --- Procesamiento Posterior para Tipos Específicos ---
-    print("--- Iniciando Procesamiento Posterior ---") # Debug
+    # --- Procesamiento Posterior (v2) ---
+    print("--- Iniciando Procesamiento Posterior (v2) ---") # Debug
     keys_to_process = list(informacion_extraida.keys())
 
     for key in keys_to_process:
         value = informacion_extraida[key]
+        original_value_for_fallback = value # Guardar por si ast falla
         print(f"Procesando Key: '{key}'") # Debug
 
-        # Intentar parsear Dicts/Lists usando ast.literal_eval
-        # Incluir todas las claves que se esperan como listas/diccionarios
+        # --- Intento 1: Parseo con ast.literal_eval ---
+        parsed_successfully = False
         if key in ['SIGNOS_VITALES', 'EXAMENES', 'DIAGNOSTICOS', 'MEDICAMENTOS', 'PLAN_DE_ACCION']:
             try:
-                # ast.literal_eval es más seguro que eval y funciona con literales Python
                 parsed_value = ast.literal_eval(value)
-
-                # Validar tipo esperado
                 if key == 'SIGNOS_VITALES' and isinstance(parsed_value, dict):
                     informacion_extraida[key] = parsed_value
-                    print(f"  '{key}' parseado como Diccionario.") # Debug
+                    parsed_successfully = True
+                    print(f"  '{key}' parseado como Dict (ast).") # Debug
                 elif key in ['EXAMENES', 'DIAGNOSTICOS', 'MEDICAMENTOS', 'PLAN_DE_ACCION'] and isinstance(parsed_value, list):
-                    # Asegurar que los elementos internos sean strings y limpiar espacios
                     informacion_extraida[key] = [str(item).strip() for item in parsed_value]
-                    print(f"  '{key}' parseado como Lista.") # Debug
+                    parsed_successfully = True
+                    print(f"  '{key}' parseado como List (ast).") # Debug
                 else:
-                    # Se parseó pero no es el tipo esperado (raro si el LLM es consistente)
-                    print(f"  WARNING: '{key}' evaluado a {type(parsed_value)}, no el tipo esperado. Se mantiene como string.") # Debug
-            except (ValueError, SyntaxError, TypeError) as e:
-                # Si ast.literal_eval falla (ej. formato incorrecto del LLM)
-                print(f"  INFO: No se pudo parsear '{key}' con ast.literal_eval: {e}. Se mantiene como string.") # Debug
-                # Dejar el valor como string original
+                    print(f"  WARNING (ast): '{key}' evaluado a {type(parsed_value)}, no esperado.") # Debug
             except Exception as e:
-                 print(f"  ERROR inesperado parseando '{key}': {e}. Se mantiene como string.") # Debug
+                print(f"  INFO (ast): Falló para '{key}': {e}.") # Debug
+                # No hacer nada aquí, el fallback se intentará después si parsed_successfully es False
 
-        # Quitar comillas externas de los valores que quedaron como strings simples
+        # --- Intento 2: Fallback para Listas (si ast falló) ---
+        # Aplicar solo a claves que deberían ser listas y donde ast falló
+        if key in ['EXAMENES', 'DIAGNOSTICOS', 'MEDICAMENTOS', 'PLAN_DE_ACCION'] and not parsed_successfully:
+            print(f"  Intentando Fallback para lista en '{key}'...") # Debug
+            try:
+                list_items = []
+                # Usar el valor original antes de cualquier intento de parseo
+                value_to_split = original_value_for_fallback
+                # Quitar corchetes si existen al inicio/final del bloque entero
+                if value_to_split.startswith('['): value_to_split = value_to_split[1:]
+                if value_to_split.endswith(']'): value_to_split = value_to_split[:-1]
+
+                potential_items = value_to_split.strip().split('\n') # Dividir por líneas
+                for item_line in potential_items:
+                    item_stripped = item_line.strip()
+                    if item_stripped: # Si la línea no está vacía
+                        # Quitar comas al inicio/final y comillas externas
+                        cleaned_item = item_stripped.strip(',')
+                        if (cleaned_item.startswith('"') and cleaned_item.endswith('"')) or \
+                           (cleaned_item.startswith("'") and cleaned_item.endswith("'")):
+                            cleaned_item = cleaned_item[1:-1]
+                        # Solo añadir si queda algo después de limpiar
+                        if cleaned_item:
+                            list_items.append(cleaned_item)
+
+                if list_items: # Si encontramos items con este método
+                     informacion_extraida[key] = list_items
+                     print(f"  '{key}' parseado como Lista (Fallback splitlines). Items: {len(list_items)}") # Debug
+                else:
+                     print(f"  Fallback para lista en '{key}' no produjo items.") # Debug
+                     # Dejar como string si el fallback tampoco funciona
+                     informacion_extraida[key] = original_value_for_fallback
+
+            except Exception as fallback_e:
+                 print(f"  ERROR en Fallback para lista en '{key}': {fallback_e}") # Debug
+                 informacion_extraida[key] = original_value_for_fallback # Dejar como string
+
+
+        # --- Limpieza Final: Strip outer quotes de strings simples ---
         if isinstance(informacion_extraida[key], str):
              current_str_val = informacion_extraida[key]
-             # Comprobar si empieza y termina con el mismo tipo de comilla
              if (current_str_val.startswith('"') and current_str_val.endswith('"')) or \
                 (current_str_val.startswith("'") and current_str_val.endswith("'")):
                  informacion_extraida[key] = current_str_val[1:-1]
                  print(f"  Strip outer quotes from '{key}'.") # Debug
 
-    print("--- Procesamiento Posterior Finalizado ---") # Debug
+    print("--- Procesamiento Posterior Finalizado (v2) ---") # Debug
     print(f"Diccionario Final: { {k: str(v)[:50]+'...' for k,v in informacion_extraida.items()} }") # Debug
     return informacion_extraida
 
@@ -117,6 +139,13 @@ if st.button("Cargar y Procesar Información"):
             # --- 1. Parsear el TEXTO CRUDO usando nuestra función ---
             st.info("Procesando texto de entrada...")
             informacion_medica = parse_llm_output_to_dict(raw_llm_output)
+
+            # !!! AÑADIR ESTA LÍNEA PARA DEBUG !!!
+            st.subheader("--- DEBUG: Diccionario Parseado ---")
+            st.json(informacion_medica)
+            st.divider()
+            # !!! FIN DE LÍNEA DE DEBUG !!!
+
             st.success("Texto procesado exitosamente!")
 
             # Usar dos columnas para mejor distribución
