@@ -189,8 +189,8 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                 # --- 3.2. Preparar Modelo y Generar Contenido ---
                 with st.spinner("Preparando modelo y generando contenido (puede tardar varios minutos)..."):
                     try:
-                        #model_name = 'gemini-1.5-pro-latest' # Puedes elegir el modelo
-                        model_name = 'gemini-2.5-pro-exp-03-25' # O usar flash que es más rápido y barato
+                        model_name = 'gemini-1.5-pro-latest' # Puedes elegir el modelo
+                        #model_name = 'gemini-2.5-pro-exp-03-25' # O usar flash que es más rápido y barato
                         model = genai.GenerativeModel(model_name)
                         st.write(f"Usando modelo: {model_name}")
 
