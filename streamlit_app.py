@@ -40,7 +40,7 @@ json_structure_example = '''
             "DiasReposo": "EXTRAER_SI_SE_INDICA_DIAS_DE_REPOSO_PARA_LA_CONSULTA",
             "SignosVitales": {
                 "FC": "EXTRAER_FRECUENCIA_CARDIACA_(pulsaciones_por_minuto)",
-                "IMC": "EXTRAER_INDICE_DE_MASA_CORPORAL_SI_SE_MENCIONA_O_CALCULA",
+                "IMC": "EXTRAER_INDICE_DE_MASA_CORPORAL_SI_SE_MENCIONA_EN_SU_DEFECTO_CALCULALO_POR_FAVOR",
                 "Size": "EXTRAER_ESTATURA_DEL_PACIENTE_(en_metros)",
                 "TAD": "EXTRAER_TENSION_ARTERIAL_DIASTOLICA_(mmHg)",
                 "TAS": "EXTRAER_TENSION_ARTERIAL_SISTOLICA_(mmHg)",
@@ -73,13 +73,13 @@ prompt_part3_final_instructions = """
 Instrucciones IMPORTANTES para el formato de salida:
 No incluyas texto explicativo, saludos, respeta las categorias y la forma en que se desglozan en el ejemplo.
 Para Diagnosticos, es necesario que busque el CIED_10 al que corresponde e incluyas en el atributo ID
-Si una pieza específica de información (ej. Signos Vitales - FC) no se menciona explícitamente en el audio, utiliza la cadena NO_ENCONTRADO
 Presta atencion durante el audio el transcurao del audio se mencionan varios diagnosticos/patologias del paciente.
-Si encuentras en el audio algun examen de laboratorio con el valor que le corresponde al resultado, incluye el simbolo de medida que corresponde
+Si encuentras en el audio algun examen de laboratorio con el valor que le corresponde al resultado, busca el simbolo o la unidad de medida que corresponde
 Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspondientes vacías: [].
 El campo LITERAL es crucial: debe contener la transcripción LITERAL del audio.
 El campo MOTIVO_CONSULTA es importante: debe contener las razones porque el paciente asiste a consulta, no excluyas el preambulo que incluye el medico a las razones.
 Presta atención a los tipos de datos esperados (números para signos vitales, cadenas para descripciones, listas para exámenes/diagnósticos/medicamentos).
+Si una pieza específica de información (ej. Signos Vitales - FC) no se menciona explícitamente en el audio, utiliza la cadena NO_ENCONTRADO
 """
 # Combinar el prompt
 prompt_text = prompt_part1 + json_structure_example + prompt_part3_final_instructions
