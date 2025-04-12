@@ -6,16 +6,16 @@ import pathlib
 import io # Necesario para manejar el archivo en memoria
 from datetime import datetime
 import pytz # Necesario si quieres mantener la hora local
-import tempfile 
-import os 
-
+import tempfile
+import os
 
 # --- 0. Configuración Inicial y Constantes ---
 st.set_page_config(layout="wide", page_title="citamedVOZ")
 st.title("CITAMED - Procesador de Audio Médico con IA Generativa")
 
 # Define el prompt directamente aquí (combinado de Colab)
-# Parte 1: Instrucciones iniciales
+# (El prompt permanece igual, no se necesita modificar)
+# ... (prompt_part1, json_structure_example, prompt_part3_final_instructions como estaban) ...
 prompt_part1 = """
 Por favor, realiza las siguientes tareas con el audio proporcionado:
 1.  **Transcribe** el contenido completo del audio. Mantén la transcripción lo más fiel posible al audio original, sin resumir. Puedes añadir mínimas palabras de conexión si mejora mucho la legibilidad, pero prioriza la fidelidad absoluta.
@@ -24,7 +24,6 @@ Por favor, realiza las siguientes tareas con el audio proporcionado:
 
 **Estructura JSON requerida (salida SÓLO JSON):**
 """
-# Parte 2: La estructura JSON
 json_structure_example = '''
 ```json
 {
@@ -68,7 +67,6 @@ json_structure_example = '''
     }
 }
 '''
-# Parte 3: Instrucciones finales
 prompt_part3_final_instructions = """
 Instrucciones IMPORTANTES para el formato de salida:
 No incluyas texto explicativo, saludos, respeta las categorias y la forma en que se desglozan en el ejemplo.
@@ -82,15 +80,12 @@ Presta atención a los tipos de datos esperados (números para signos vitales, c
 Si una pieza específica de información (ej. Signos Vitales - FC) no se menciona explícitamente en el audio, utiliza la cadena NO_ENCONTRADO
 Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspondientes vacías: [].
 """
-# Combinar el prompt
 prompt_text = prompt_part1 + json_structure_example + prompt_part3_final_instructions
 
 # --- 1. Configuración de la API Key de Google ---
 api_key_configured = False
 google_api_key = None
 try:
-    # Intenta obtener la clave desde los secretos de Streamlit
-    # Debes configurar un secreto llamado 'GOOGLE_API_KEY' en tu app de Streamlit Cloud
     google_api_key = st.secrets.get("GOOGLE_API_KEY")
     if google_api_key:
         genai.configure(api_key=google_api_key)
@@ -119,12 +114,32 @@ uploaded_file = st.file_uploader(
     help="Sube el archivo de audio que deseas procesar."
 )
 
+# --- 2.5 Selección del Modelo (NUEVO WIDGET) ---
+st.divider()
+st.subheader("1.5. Selecciona el Modelo de IA")
+# Define los modelos disponibles en la lista desplegable
+model_options = [ 'gemini-2.5-pro-exp-03-25', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest']
+# Crea el selectbox y guarda la selección del usuario en una variable
+selected_model_name = st.selectbox(
+    "Elige el modelo de IA Generativa:",
+    options=model_options,
+    index=0,  # Puedes poner el índice del modelo por defecto (0 para flash, 1 para pro)
+    help="""Selecciona el modelo a usar:
+    - **gemini-2.5-pro-exp-03-25:** Modelo experimental (puede tener comportamiento inesperado).
+    - **gemini-1.5-flash-latest:** Más rápido y económico, bueno para tareas estándar.
+    - **gemini-1.5-pro-latest:** Modelo potente y balanceado."""
+)
+st.info(f"Modelo seleccionado: **{selected_model_name}**")
+
+
 # --- 3. Botón de Procesamiento y Lógica Principal ---
 st.divider()
+# El botón ahora depende de la API key y el archivo subido (el modelo siempre está seleccionado)
 if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_configured or not uploaded_file):
 
+    # Usa la variable `selected_model_name` dentro de la lógica del botón
     if uploaded_file is not None and api_key_configured:
-        st.info(f"Archivo '{uploaded_file.name}' cargado. Iniciando procesamiento...")
+        st.info(f"Archivo '{uploaded_file.name}' cargado. Usando modelo '{selected_model_name}'. Iniciando procesamiento...") # Mensaje actualizado
 
         audio_file_ref = None
         google_upload_successful = False
@@ -139,77 +154,84 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
             with st.spinner(f"Preparando y subiendo '{uploaded_file.name}' a Google AI..."):
                 upload_start_time = time.time()
                 try:
-                    # Crear un archivo temporal con el mismo sufijo (extensión)
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_file:
-                        temp_file.write(uploaded_file.getvalue()) # Escribir los bytes al archivo temporal
-                        temp_file_path = temp_file.name # Obtener la ruta del archivo temporal
+                        temp_file.write(uploaded_file.getvalue())
+                        temp_file_path = temp_file.name
 
                     st.write(f"Archivo temporal creado en: {temp_file_path}")
 
-                    # Ahora subir usando la ruta (path)
                     audio_file_ref = genai.upload_file(
-                        path=temp_file_path, # <--- Usar path
+                        path=temp_file_path,
                         display_name=f"streamlit_{int(time.time())}_{uploaded_file.name}",
-                        mime_type="audio/ogg" # Especificar mime type es bueno
+                        mime_type="audio/ogg"
                     )
                     st.write(f"Archivo enviado a Google AI. Nombre de referencia: {audio_file_ref.name}. Esperando procesamiento...")
 
-                    # Esperar a que el archivo esté activo (lógica de Colab adaptada)
                     while audio_file_ref.state.name == "PROCESSING":
                         st.write(f"Estado actual: {audio_file_ref.state.name}. Esperando 5 segundos...")
                         time.sleep(5)
                         try:
-                            audio_file_ref = genai.get_file(audio_file_ref.name) # Re-obtener estado
+                            audio_file_ref = genai.get_file(audio_file_ref.name)
                         except Exception as get_file_e:
                             st.warning(f"Error obteniendo estado: {get_file_e}. Reintentando...")
                             time.sleep(5)
-                            continue # Reintentar obtener estado
+                            continue
 
-                        if time.time() - upload_start_time > 300: # Timeout 5 min
+                        if time.time() - upload_start_time > 300:
                             raise TimeoutError(f"Timeout: El archivo '{audio_file_ref.name}' sigue en estado {audio_file_ref.state.name} tras 5 minutos.")
 
-                    # Verificar estado final
                     if audio_file_ref.state.name == "FAILED":
                         raise ValueError(f"Error: Subida/procesamiento de '{audio_file_ref.name}' falló en Google AI.")
                     elif audio_file_ref.state.name != "ACTIVE":
                         st.warning(f"Estado final inesperado: {audio_file_ref.state.name}. Intentando continuar...")
-                        google_upload_successful = True # Intentar aunque no sea 'ACTIVE'
+                        google_upload_successful = True
                     else:
                         st.write(f"Archivo '{audio_file_ref.name}' está ACTIVO.")
                         google_upload_successful = True
 
                 except Exception as e:
                     st.error(f"Error durante la subida o procesamiento en Google AI: {e}")
-                    # Salir del bloque try principal si la subida falla
                     raise e
+                finally:
+                     # Asegurarse de eliminar el archivo temporal local SIEMPRE
+                     if temp_file_path and os.path.exists(temp_file_path):
+                        try:
+                            os.remove(temp_file_path)
+                            st.write(f"Archivo temporal local '{temp_file_path}' eliminado.")
+                        except Exception as e_remove:
+                            st.warning(f"No se pudo eliminar el archivo temporal local {temp_file_path}: {e_remove}")
 
             if not google_upload_successful:
                 st.error("El archivo no pudo ser procesado por Google AI. No se puede continuar.")
             else:
                 # --- 3.2. Preparar Modelo y Generar Contenido ---
-                with st.spinner("Preparando modelo y generando contenido (puede tardar varios minutos)..."):
+                # Usa el modelo seleccionado por el usuario
+                with st.spinner(f"Preparando modelo '{selected_model_name}' y generando contenido (puede tardar)..."):
                     try:
-                        model_name = 'gemini-1.5-pro-latest' # Puedes elegir el modelo
-                        #model_name = 'gemini-2.5-pro-exp-03-25' # O usar flash que es más rápido y barato
-                        model = genai.GenerativeModel(model_name)
-                        st.write(f"Usando modelo: {model_name}")
+                        # YA NO SE NECESITA DEFINIR model_name AQUÍ
+                        # model_name = 'gemini-1.5-pro-latest' # Borrar o comentar
+                        # model_name = 'gemini-2.5-pro-exp-03-25' # Borrar o comentar
+
+                        # Instanciar el modelo usando la variable del selectbox
+                        model = genai.GenerativeModel(selected_model_name)
+                        st.write(f"Usando modelo confirmado: {selected_model_name}") # Confirmación adicional
 
                         generation_config = genai.GenerationConfig(
                             temperature=0.1,
-                            # response_mime_type="application/json" # Descomentar si quieres forzar salida JSON (¡puede fallar si el modelo no cumple!)
+                            # response_mime_type="application/json" # Mantenlo comentado si prefieres procesar texto
                         )
 
                         model_start_time = time.time()
-                        # Enviar prompt y referencia del archivo de audio
                         response = model.generate_content(
                             [prompt_text, audio_file_ref],
                             generation_config=generation_config,
-                            request_options={'timeout': 600} # Timeout 10 min para la generación
+                            request_options={'timeout': 600}
                         )
                         model_end_time = time.time()
                         st.write(f"Respuesta recibida del modelo en {model_end_time - model_start_time:.2f} segundos.")
                         generation_successful = True
 
+                    # ... (El resto del manejo de excepciones de la generación permanece igual) ...
                     except genai.types.generation_types.BlockedPromptException as blocked_error:
                         st.error(f"Error: La solicitud fue bloqueada por políticas de seguridad.")
                         try:
@@ -220,7 +242,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                                 st.warning(f"Feedback del Prompt (puede indicar bloqueo): {response.prompt_feedback}")
                         except Exception:
                             st.warning("(No se pudo obtener feedback detallado del bloqueo)")
-                        # No continuar si está bloqueado
                         generation_successful = False
 
                     except Exception as e:
@@ -236,11 +257,11 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                 # --- 3.3. Procesar Respuesta y Extraer JSON ---
                 if generation_successful and response:
                     st.write("Procesando respuesta del modelo...")
+                    # ... (El resto de la lógica de extracción de JSON permanece igual) ...
                     try:
                         response_text = response.text
                         json_block = None
 
-                        # Intenta extraer JSON delimitado por ```json ... ```
                         start_marker = "```json"
                         end_marker = "```"
                         start_index = response_text.find(start_marker)
@@ -250,36 +271,31 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if end_index != -1:
                                 json_block = response_text[start_index:end_index].strip()
                                 st.write("JSON extraído usando delimitadores ```json.")
-
-                        # Si no, busca el primer { y el último }
-                        if json_block is None:
+                        else:
                             json_start_index = response_text.find('{')
                             json_end_index = response_text.rfind('}')
                             if json_start_index != -1 and json_end_index != -1 and json_end_index > json_start_index:
                                 json_block = response_text[json_start_index : json_end_index + 1].strip()
                                 st.write("JSON extraído buscando primer '{' y último '}'.")
-                            else: # Último recurso
+                            else:
                                 json_block = response_text.strip()
                                 st.warning("No se detectó estructura JSON clara con ``` o {}. Usando respuesta completa como posible JSON.")
 
-                        # Validar y parsear el JSON extraído
                         try:
                             parsed_json = json.loads(json_block)
                             st.success("JSON extraído y validado exitosamente.")
-                            
-                            # --- INICIO: NUEVA SECCIÓN PARA MOSTRAR JSON COMPLETO ---
-                            st.divider() # Separador visual
+
+                            st.divider()
                             st.subheader("JSON Completo Recibido del Modelo")
-                            with st.expander("Ver/Ocultar JSON completo", expanded=False): # Ponerlo en un expander por defecto cerrado
-                                st.json(parsed_json, expanded=True) # 'expanded=True' dentro del expander para el widget json en sí
-                            st.divider() # Otro separador visual
-                            # --- FIN: NUEVA SECCIÓN ---
+                            with st.expander("Ver/Ocultar JSON completo", expanded=False):
+                                st.json(parsed_json, expanded=True)
+                            st.divider()
 
                         except json.JSONDecodeError as json_error:
                             st.error(f"Error: El texto extraído NO es un JSON válido.")
                             st.error(f"Detalle: {json_error}")
                             st.text_area("Texto recibido del modelo (con error de JSON):", value=json_block, height=200)
-                            parsed_json = None # Asegurar que no se intente mostrar
+                            parsed_json = None
 
                     except AttributeError:
                         st.error("Error: La respuesta del modelo no tiene el atributo 'text'.")
@@ -298,7 +314,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
 
         except Exception as main_e:
             st.error(f"Error en el flujo principal de procesamiento: {main_e}")
-            # Asegurarse de que parsed_json es None para no intentar mostrar nada
             parsed_json = None
 
         finally:
@@ -313,7 +328,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
             elif google_upload_successful:
                 st.warning("No se pudo intentar eliminar el archivo de Google AI (falta referencia válida).")
 
-            # Limpieza del archivo local no es necesaria explícitamente con st.file_uploader
 
             st.info("Proceso completado (con posibles errores indicados arriba).")
 
@@ -322,14 +336,12 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
         st.divider()
         st.subheader("3. Resultados del Procesamiento")
 
+        # ... (Toda la lógica para mostrar los resultados basada en `parsed_json` permanece exactamente igual) ...
         if parsed_json:
             try:
-                # Validar estructura básica y extraer datos médicos
                 if parsed_json.get("status") == "OK" and "data" in parsed_json and "existing-mrs" in parsed_json["data"]:
                     informacion_medica = parsed_json["data"]["existing-mrs"]
                     st.success("Mostrando información extraída:")
-
-                    # --- INICIO: SECCIONES EXPANDIBLES (Copiado de tu script Streamlit) ---
 
                     # SECCION: Consulta (3 Columnas)
                     with st.expander("Detalles de la Consulta", expanded=True):
@@ -367,7 +379,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                                     displayed_keys.add(key)
                                     i += 1
 
-                            # Mostrar claves restantes no incluidas en el orden preferido
                             extra_keys = [k for k in signos_vitales_data if k not in displayed_keys]
                             for key in extra_keys:
                                 value = signos_vitales_data[key]
@@ -382,7 +393,7 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             st.json(signos_vitales_data)
 
                     # SECCION: Exámenes
-                    with st.expander("Exámenes Solicitados"):
+                    with st.expander("Exámenes Solicitados/Resultados"):
                         examenes_data = informacion_medica.get("Examenes", [])
                         if isinstance(examenes_data, list):
                             if examenes_data:
@@ -410,20 +421,12 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if diagnosticos_data:
                                 for diag_dict in diagnosticos_data:
                                     if isinstance(diag_dict, dict):
-                                        # --- OBTENER AMBOS CAMPOS ---
                                         nombre_diag = diag_dict.get("Nombre", "Nombre no especificado")
-                                        diag_id = diag_dict.get("ID", "") # Obtener el ID, default a vacío si no existe
-
-                                        # --- CONSTRUIR EL TEXTO A MOSTRAR ---
-                                        display_text = f"- **{nombre_diag}**" # Empezar con el nombre en negrita
-
-                                        # Añadir el ID solo si existe, no está vacío y no es "NO_ENCONTRADO"
+                                        diag_id = diag_dict.get("ID", "")
+                                        display_text = f"- **{nombre_diag}**"
                                         if diag_id and diag_id.strip() and diag_id.upper() != "NO_ENCONTRADO":
                                             display_text += f" (ID: {diag_id})"
-
-                                        # Mostrar el texto combinado
                                         st.markdown(display_text)
-                                        # --- FIN DE LA CORRECCIÓN ---
                                     else:
                                         st.warning(f"Elemento inesperado en Diagnosticos: {diag_dict}")
                             else:
@@ -442,7 +445,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                                         nombre = med_dict.get("Nombre", f"Medicamento {i+1}")
                                         presentacion = med_dict.get("Presentacion", "No especificada")
                                         dosis = med_dict.get("Dosis", "No especificada")
-
                                         med_title = f"**{nombre}** ({presentacion})"
                                         st.markdown(med_title)
                                         st.text_area(f"Dosis_{i}", value=dosis, key=f"med_dosis_{i}", height=80, label_visibility="collapsed", disabled=True)
@@ -455,66 +457,48 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             st.warning("Formato inesperado para Medicinas en el JSON.")
                             st.json(medicamentos_data)
 
-                    # SECCION: Plan de Acción (CORREGIDA - Lista Numerada)
+                    # SECCION: Plan de Acción
                     with st.expander("Plan de Acción"):
                         plan_data = informacion_medica.get("PlanDeAccion", [])
-
                         if isinstance(plan_data, list):
                             if plan_data:
-                                items_markdown = [] # Lista para guardar los strings formateados
+                                items_markdown = []
                                 valid_items_found = False
                                 for item_dict in plan_data:
                                     if isinstance(item_dict, dict) and len(item_dict) == 1:
-                                        # Extraer la clave (número) y el valor (instrucción)
-                                        # Asumiendo que solo hay una clave-valor por diccionario
                                         try:
                                             numero_consecutivo = list(item_dict.keys())[0]
                                             instruccion = list(item_dict.values())[0]
-
-                                            # Validar que la clave sea (o parezca) un número
                                             try:
                                                 num_val = int(numero_consecutivo)
-                                                # Formatear como ítem de lista numerada markdown
-                                                # IMPORTANTE: Usar el número como prefijo seguido de un punto y espacio
                                                 items_markdown.append(f"{num_val}. {instruccion}")
                                                 valid_items_found = True
                                             except ValueError:
-                                                # Si la clave no es un número, usar bullet point como fallback
-                                                # y añadirlo directamente a la salida, no a la lista numerada
                                                 st.warning(f"Ítem en PlanDeAccion con clave no numérica: '{numero_consecutivo}'. Mostrando como texto:")
                                                 st.markdown(f"- {instruccion}")
-
-
                                         except IndexError:
-                                            # Diccionario vacío, ignorar o marcar
                                             st.warning("Se encontró un diccionario vacío en PlanDeAccion.")
                                     else:
-                                        # Manejar si un elemento no es el diccionario esperado
-                                        st.warning(f"Elemento inesperado en PlanDeAccion (no es dict de 1 elemento): {item_dict}. Mostrando como texto:")
-                                        # Intentar mostrar el valor si es un string simple
+                                        st.warning(f"Elemento inesperado en PlanDeAccion: {item_dict}. Mostrando como texto:")
                                         if isinstance(item_dict, str):
                                             st.markdown(f"- {item_dict}")
-                                        elif isinstance(item_dict, dict): # Si es dict pero > 1 elemento
+                                        elif isinstance(item_dict, dict):
                                             st.markdown(f"- {item_dict}") # Mostrar dict como texto
 
-                                # Unir todos los ítems formateados numéricamente en una sola cadena de markdown
                                 if valid_items_found:
                                     st.markdown("\n".join(items_markdown))
-                                elif not plan_data: # Si la lista original estaba vacía
+                                elif not plan_data:
                                     st.info("No se especificó plan de acción en el JSON (lista vacía).")
-                                else: # Si la lista tenía datos pero ninguno era válido para numerar
-                                    st.info("No se encontraron instrucciones numeradas válidas en PlanDeAccion. Se mostraron advertencias arriba si hubo ítems con formato inesperado.")
+                                else:
+                                    st.info("No se encontraron instrucciones numeradas válidas en PlanDeAccion.")
                             else:
                                 st.info("No se especificó plan de acción en el JSON (lista vacía).")
-                        # Mantener el fallback por si el formato no es una lista
                         elif isinstance(plan_data, str) and plan_data:
-                            st.markdown(f"Plan: {plan_data}") # Mostrar como texto simple si es string
+                            st.markdown(f"Plan: {plan_data}")
                         else:
                             st.warning("Formato inesperado para PlanDeAccion o está vacío.")
-                            # Opcional: mostrar el formato inesperado si no es lista ni string
                             if not isinstance(plan_data, (list, str)):
                                 st.json(plan_data)
-
 
                     # SECCION: Días de Reposo
                     with st.expander("Indicación de Reposo"):
@@ -527,7 +511,7 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                         else:
                             st.info("No se especificó indicación de reposo.")
 
-                    # SECCION: Comentarios y Literal (2 Columnas)
+                    # SECCION: Comentarios y Literal
                     with st.expander("Comentarios del Modelo y Transcripción Completa", expanded=True):
                         col_comm, col_lit = st.columns(2)
                         with col_comm:
@@ -538,8 +522,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             st.subheader("Transcripción Literal")
                             literal_val = informacion_medica.get("Literal", "")
                             st.text_area("Literal", value=literal_val, height=300, label_visibility="collapsed", disabled=True, key="lit_tx")
-
-                    # --- FIN: SECCIONES EXPANDIBLES ---
 
                 elif parsed_json and "message" in parsed_json:
                     st.error(f"Error en la respuesta JSON recibida del modelo: {parsed_json.get('message', 'Mensaje no encontrado')}")
@@ -554,9 +536,9 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                 st.write("JSON problemático:")
                 st.json(parsed_json)
 
-        elif generation_successful: # Si la generación fue OK pero el parseo JSON falló
+        elif generation_successful:
              st.error("No se pudo mostrar la información porque el JSON generado por el modelo no es válido o no se pudo extraer.")
-        else: # Si hubo error antes de obtener JSON
+        else:
             st.warning("No hay información para mostrar debido a errores en pasos anteriores (subida, generación, etc.).")
 
     elif not uploaded_file:
@@ -567,7 +549,6 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
 # --- Sección Opcional: Hora Actual ---
 st.divider()
 try:
-    # Intenta usar zona horaria específica, si no, usa UTC o local
     tz = pytz.timezone('America/Caracas') # Cambia a tu zona horaria si es necesario
     current_time_str = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S %Z%z')
 except Exception:
