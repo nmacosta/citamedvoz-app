@@ -2,20 +2,24 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import time
-import pathlib
+import pathlib # Aunque no se usa directamente, genai puede depender de él
 import io # Necesario para manejar el archivo en memoria
 from datetime import datetime
-import pytz # Necesario si quieres mantener la hora local
+import pytz # Necesario para zona horaria específica
 import tempfile
 import os
+
+# --- IMPORTACIONES PARA GOOGLE SHEETS ---
+import gspread
+from google.oauth2.service_account import Credentials
+import gspread.exceptions # Para capturar errores específicos de API
+# --------------------------------------------
 
 # --- 0. Configuración Inicial y Constantes ---
 st.set_page_config(layout="wide", page_title="citamedVOZ")
 st.title("CITAMED - Procesador de Audio Médico con IA Generativa")
 
-# Define el prompt directamente aquí (combinado de Colab)
-# (El prompt permanece igual, no se necesita modificar)
-# ... (prompt_part1, json_structure_example, prompt_part3_final_instructions como estaban) ...
+# --- Prompt para Gemini ---
 prompt_part1 = """
 Por favor, realiza las siguientes tareas con el audio proporcionado:
 1.  **Transcribe** el contenido completo del audio. Mantén la transcripción lo más fiel posible al audio original, sin resumir. Puedes añadir mínimas palabras de conexión si mejora mucho la legibilidad, pero prioriza la fidelidad absoluta.
@@ -82,27 +86,123 @@ Si no se mencionan Examenes, Diagnosticoss o Medicinas, deja las listas correspo
 """
 prompt_text = prompt_part1 + json_structure_example + prompt_part3_final_instructions
 
-# --- 1. Configuración de la API Key de Google ---
+# --- CONSTANTES PARA GOOGLE SHEETS ---
+GSHEET_SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive.file' # A veces necesario para algunas operaciones de gspread
+]
+# Asegúrate que este orden sea EXACTO al de tu hoja de log
+EXPECTED_GSHEET_COLUMNS = [
+    "Timestamp", "Filename", "Model", "Status", "Message", "MotivoConsulta",
+    "EnfermedadActual", "Antecedentes", "ExamenFisico", "DiasReposo",
+    "SignosVitales_Resumen", "Examenes_Resumen", "Diagnosticos_Resumen",
+    "Medicinas_Resumen", # Mapeado desde la columna '850mg' original
+    "PlanDeAccion_Resumen", "ComentariosModelo", "Literal",
+    "JSON_Completo"
+]
+# -----------------------------------
+
+# --- FUNCIONES PARA GOOGLE SHEETS ---
+def connect_to_gsheet():
+    """Carga credenciales de Sheets desde secretos y conecta con gspread."""
+    try:
+        # Lee las credenciales JSON del secreto
+        creds_json_str = st.secrets["GOOGLE_CREDENTIALS_JSON"]
+        try:
+            # Parsea el string JSON a un diccionario
+            creds_dict = json.loads(creds_json_str)
+        except json.JSONDecodeError as json_err:
+             st.error(f"GSHEET Error: No se pudo decodificar el JSON de credenciales: {json_err}")
+             # Opcional: Mostrar inicio del JSON problemático para depurar
+             # st.text_area("GSHEET: Inicio del JSON problemático:", creds_json_str[:200] + "...", height=50)
+             return None
+
+        # Crea las credenciales y autoriza gspread
+        creds = Credentials.from_service_account_info(creds_dict, scopes=GSHEET_SCOPES)
+        gc = gspread.authorize(creds)
+        # st.write("GSHEET: Conexión establecida.") # Mensaje de depuración opcional
+        return gc
+
+    except KeyError:
+        # Error si falta el secreto de credenciales
+        st.error("GSHEET Error: Falta el secreto 'GOOGLE_CREDENTIALS_JSON'.")
+        return None
+    except Exception as e:
+        # Captura cualquier otro error durante la conexión/autorización
+        st.error(f"GSHEET Error al conectar/autenticar: {e}")
+        return None
+
+def get_worksheet(gc):
+    """Obtiene la hoja de cálculo de log usando la URL del secreto."""
+    try:
+        # Lee la URL completa de la hoja desde los secretos
+        sheet_url = st.secrets["GOOGLE_SHEET_LOG_URL"]
+        # st.write(f"GSHEET: Intentando abrir hoja por URL: '{sheet_url[:50]}...'") # Mensaje de depuración opcional
+
+        # Abre la hoja de cálculo usando su URL
+        spreadsheet = gc.open_by_url(sheet_url)
+        # Asume que se usará la primera hoja (sheet1)
+        worksheet = spreadsheet.sheet1
+        # st.write("GSHEET: Hoja obtenida por URL.") # Mensaje de depuración opcional
+        return worksheet
+
+    except KeyError:
+        # Error si falta el secreto de la URL
+         st.error("GSHEET Error: Falta el secreto 'GOOGLE_SHEET_LOG_URL'.")
+         return None
+    except gspread.exceptions.APIError as api_err:
+         # Error específico de la API de Google (permisos, etc.)
+         st.error(f"GSHEET Error de API al abrir por URL: {api_err}")
+         st.error("Verifica que la URL sea correcta y que la cuenta de servicio tenga permisos de EDITOR.")
+         return None
+    except gspread.exceptions.SpreadsheetNotFound:
+         # Error si la URL es incorrecta o la hoja no existe/no es accesible
+         st.error(f"GSHEET Error 'SpreadsheetNotFound' al usar la URL.")
+         st.error("Verifica que la URL sea correcta y que la hoja exista y sea accesible.")
+         return None
+    except Exception as e:
+        # Captura cualquier otro error inesperado
+        st.error(f"GSHEET Error inesperado al abrir por URL: {e}")
+        return None
+# ----------------------------------
+
+
+# --- 1. Verificación de Secretos Necesarios ---
+st.divider()
+st.subheader("Verificación de Claves API y Secretos")
 api_key_configured = False
-google_api_key = None
+google_sheets_configured = False
+
+# Verificar API Key de Gemini
 try:
     google_api_key = st.secrets.get("GOOGLE_API_KEY")
     if google_api_key:
         genai.configure(api_key=google_api_key)
         api_key_configured = True
-        st.info("API Key de Google configurada correctamente desde los secretos.")
+        st.success("✅ API Key de Google Gemini configurada.")
     else:
-        st.error("Error: No se encontró la 'GOOGLE_API_KEY' en los secretos de Streamlit.")
-        st.markdown("""
-            **ACCIÓN REQUERIDA:**
-            1.  Ve a la configuración de tu aplicación en Streamlit Cloud.
-            2.  En la sección 'Secrets', añade un nuevo secreto llamado `GOOGLE_API_KEY`.
-            3.  Pega tu clave API de Google como valor.
-            4.  Guarda y reinicia la aplicación si es necesario.
+        st.error("❌ Falta el secreto 'GOOGLE_API_KEY'.")
+except Exception as e:
+    st.error(f"Error configurando API Key Gemini: {e}")
+
+# Verificar Secretos de Google Sheets (Credenciales JSON y URL de la hoja)
+try:
+    required_sheets_secrets = ["GOOGLE_CREDENTIALS_JSON", "GOOGLE_SHEET_LOG_URL"]
+    missing_secrets = [s for s in required_sheets_secrets if s not in st.secrets]
+
+    if not missing_secrets:
+         google_sheets_configured = True
+         st.success("✅ Secretos para Google Sheets encontrados (JSON y URL).")
+    else:
+         st.error(f"❌ Faltan secretos para Google Sheets: {', '.join(missing_secrets)}.")
+         st.markdown("""
+            **ACCIÓN REQUERIDA (Google Sheets):**
+            1.  Asegúrate de tener `GOOGLE_CREDENTIALS_JSON` con el JSON de la cuenta de servicio.
+            2.  Asegúrate de tener `GOOGLE_SHEET_LOG_URL` con la URL completa de tu hoja de log.
             """)
 except Exception as e:
-    st.error(f"Ocurrió un error al intentar configurar la API Key: {e}")
-    st.markdown("Verifica que has configurado correctamente el secreto 'GOOGLE_API_KEY'.")
+     st.error(f"Error verificando secretos de Sheets: {e}")
+
 
 # --- 2. Subida del Archivo de Audio ---
 st.divider()
@@ -111,180 +211,267 @@ uploaded_file = st.file_uploader(
     "Selecciona un archivo de audio (.ogg):",
     type=['ogg'],
     accept_multiple_files=False,
-    help="Sube el archivo de audio que deseas procesar."
+    help="Sube el archivo OGG que contiene la consulta médica."
 )
 
-# --- 2.5 Selección del Modelo (NUEVO WIDGET) ---
+# --- 2.5 Selección del Modelo de IA ---
 st.divider()
 st.subheader("1.5. Selecciona el Modelo de IA")
-# Define los modelos disponibles en la lista desplegable
-model_options = [ 'gemini-2.5-pro-exp-03-25', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest']
-# Crea el selectbox y guarda la selección del usuario en una variable
+# Define los modelos disponibles
+model_options = ['gemini-2.5-pro-exp-03-25', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest']
 selected_model_name = st.selectbox(
     "Elige el modelo de IA Generativa:",
     options=model_options,
-    index=0,  # Puedes poner el índice del modelo por defecto (0 para flash, 1 para pro)
-    help="""Selecciona el modelo a usar:
-    - **gemini-2.5-pro-exp-03-25:** Modelo experimental (puede tener comportamiento inesperado).
-    - **gemini-1.5-flash-latest:** Más rápido y económico, bueno para tareas estándar.
-    - **gemini-1.5-pro-latest:** Modelo potente y balanceado."""
+    index=0, # Modelo por defecto
+    help="Selecciona el modelo a usar para procesar el audio."
 )
 st.info(f"Modelo seleccionado: **{selected_model_name}**")
 
 
 # --- 3. Botón de Procesamiento y Lógica Principal ---
 st.divider()
-# El botón ahora depende de la API key y el archivo subido (el modelo siempre está seleccionado)
-if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_configured or not uploaded_file):
+# El botón se deshabilita si falta la API Key de Gemini o no se ha subido archivo
+process_button_disabled = not api_key_configured or not uploaded_file
+if st.button("2. Procesar Audio y Generar Información", disabled=process_button_disabled):
 
-    # Usa la variable `selected_model_name` dentro de la lógica del botón
+    # Solo procede si hay archivo y la API de Gemini está lista
     if uploaded_file is not None and api_key_configured:
-        st.info(f"Archivo '{uploaded_file.name}' cargado. Usando modelo '{selected_model_name}'. Iniciando procesamiento...") # Mensaje actualizado
+        st.info(f"Archivo '{uploaded_file.name}' cargado. Usando modelo '{selected_model_name}'. Iniciando procesamiento...")
 
+        # Variables para controlar el flujo y almacenar resultados/referencias
         audio_file_ref = None
         google_upload_successful = False
         generation_successful = False
         response = None
-        parsed_json = None
-        json_display_placeholder = st.empty()
-        temp_file_path = None # Para guardar la ruta del archivo temporal
+        parsed_json = None # Aquí se guardará el JSON parseado si tiene éxito
+        temp_file_path = None # Ruta al archivo temporal local
 
         try:
-            # --- 3.1. Guardar archivo subido a un archivo temporal y subir a Google AI ---
-            with st.spinner(f"Preparando y subiendo '{uploaded_file.name}' a Google AI..."):
+            # --- 3.1. Subir archivo a Google AI ---
+            with st.spinner(f"Subiendo '{uploaded_file.name}' a Google AI..."):
                 upload_start_time = time.time()
                 try:
+                    # Guarda el archivo subido en un archivo temporal local
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_file:
                         temp_file.write(uploaded_file.getvalue())
                         temp_file_path = temp_file.name
 
-                    st.write(f"Archivo temporal creado en: {temp_file_path}")
-
+                    # Sube el archivo temporal a Google AI File Service
                     audio_file_ref = genai.upload_file(
                         path=temp_file_path,
                         display_name=f"streamlit_{int(time.time())}_{uploaded_file.name}",
-                        mime_type="audio/ogg"
+                        mime_type="audio/ogg" # Asegura el tipo MIME correcto
                     )
-                    st.write(f"Archivo enviado a Google AI. Nombre de referencia: {audio_file_ref.name}. Esperando procesamiento...")
+                    # st.write(f"Archivo enviado ({audio_file_ref.name}). Esperando procesamiento...") # Opcional
 
+                    # Espera a que el archivo esté listo (ACTIVE) en Google AI
                     while audio_file_ref.state.name == "PROCESSING":
-                        st.write(f"Estado actual: {audio_file_ref.state.name}. Esperando 5 segundos...")
-                        time.sleep(5)
+                        time.sleep(5) # Espera prudencial
                         try:
+                            # Re-obtiene el estado del archivo
                             audio_file_ref = genai.get_file(audio_file_ref.name)
                         except Exception as get_file_e:
+                            # Si hay error obteniendo estado, espera y reintenta
                             st.warning(f"Error obteniendo estado: {get_file_e}. Reintentando...")
                             time.sleep(5)
                             continue
 
-                        if time.time() - upload_start_time > 300:
-                            raise TimeoutError(f"Timeout: El archivo '{audio_file_ref.name}' sigue en estado {audio_file_ref.state.name} tras 5 minutos.")
+                        # Timeout para evitar esperas infinitas
+                        if time.time() - upload_start_time > 300: # 5 minutos
+                            raise TimeoutError(f"Timeout: El archivo '{audio_file_ref.name}' sigue en estado PROCESSING.")
 
+                    # Verifica el estado final de la subida/procesamiento en Google AI
                     if audio_file_ref.state.name == "FAILED":
                         raise ValueError(f"Error: Subida/procesamiento de '{audio_file_ref.name}' falló en Google AI.")
-                    elif audio_file_ref.state.name != "ACTIVE":
-                        st.warning(f"Estado final inesperado: {audio_file_ref.state.name}. Intentando continuar...")
-                        google_upload_successful = True
+
+                    google_upload_successful = (audio_file_ref.state.name == "ACTIVE")
+                    if not google_upload_successful:
+                        st.warning(f"Estado final de subida inesperado: {audio_file_ref.state.name}. Se intentará continuar.")
                     else:
-                        st.write(f"Archivo '{audio_file_ref.name}' está ACTIVO.")
-                        google_upload_successful = True
+                         st.write(f"Archivo '{audio_file_ref.name}' está ACTIVO y listo para usar.")
 
                 except Exception as e:
-                    st.error(f"Error durante la subida o procesamiento en Google AI: {e}")
-                    raise e
+                    # Captura cualquier error durante la subida
+                    st.error(f"Error durante la subida a Google AI: {e}")
+                    raise e # Propaga el error para detener el flujo si es necesario
                 finally:
-                     # Asegurarse de eliminar el archivo temporal local SIEMPRE
+                     # Asegura la eliminación del archivo temporal local
                      if temp_file_path and os.path.exists(temp_file_path):
                         try:
                             os.remove(temp_file_path)
-                            st.write(f"Archivo temporal local '{temp_file_path}' eliminado.")
+                            # st.write(f"Archivo temporal local '{temp_file_path}' eliminado.") # Opcional
                         except Exception as e_remove:
-                            st.warning(f"No se pudo eliminar el archivo temporal local {temp_file_path}: {e_remove}")
+                            st.warning(f"No se pudo eliminar archivo temporal local {temp_file_path}: {e_remove}")
 
+            # Si la subida falló, no continuar
             if not google_upload_successful:
-                st.error("El archivo no pudo ser procesado por Google AI. No se puede continuar.")
+                st.error("Fallo en la subida a Google AI. No se puede procesar.")
             else:
-                # --- 3.2. Preparar Modelo y Generar Contenido ---
-                # Usa el modelo seleccionado por el usuario
-                with st.spinner(f"Preparando modelo '{selected_model_name}' y generando contenido (puede tardar)..."):
+                # --- 3.2. Generar Contenido con el Modelo Gemini ---
+                with st.spinner(f"Generando contenido con '{selected_model_name}' (esto puede tardar)..."):
                     try:
-                        # YA NO SE NECESITA DEFINIR model_name AQUÍ
-                        # model_name = 'gemini-1.5-pro-latest' # Borrar o comentar
-                        # model_name = 'gemini-2.5-pro-exp-03-25' # Borrar o comentar
-
-                        # Instanciar el modelo usando la variable del selectbox
+                        # Instancia el modelo seleccionado por el usuario
                         model = genai.GenerativeModel(selected_model_name)
-                        st.write(f"Usando modelo confirmado: {selected_model_name}") # Confirmación adicional
-
-                        generation_config = genai.GenerationConfig(
-                            temperature=0.1,
-                            # response_mime_type="application/json" # Mantenlo comentado si prefieres procesar texto
-                        )
-
+                        # Configuración de generación (opcional, ajusta según necesidad)
+                        generation_config = genai.GenerationConfig(temperature=0.1)
+                        # Llamada a la API de Gemini
                         model_start_time = time.time()
                         response = model.generate_content(
-                            [prompt_text, audio_file_ref],
+                            [prompt_text, audio_file_ref], # Combina prompt e info del archivo
                             generation_config=generation_config,
-                            request_options={'timeout': 600}
+                            request_options={'timeout': 600} # Timeout para la llamada a la API (10 min)
                         )
                         model_end_time = time.time()
-                        st.write(f"Respuesta recibida del modelo en {model_end_time - model_start_time:.2f} segundos.")
+                        st.write(f"Respuesta del modelo recibida en {model_end_time - model_start_time:.2f} segundos.")
                         generation_successful = True
 
-                    # ... (El resto del manejo de excepciones de la generación permanece igual) ...
                     except genai.types.generation_types.BlockedPromptException as blocked_error:
+                        # Captura errores de bloqueo por políticas de seguridad
                         st.error(f"Error: La solicitud fue bloqueada por políticas de seguridad.")
+                        # Intenta mostrar feedback si está disponible
                         try:
                             feedback = getattr(blocked_error, 'response', {}).get('prompt_feedback', None)
-                            if feedback:
-                                st.warning(f"Razón del bloqueo: {feedback}")
-                            elif response and hasattr(response, 'prompt_feedback'):
-                                st.warning(f"Feedback del Prompt (puede indicar bloqueo): {response.prompt_feedback}")
-                        except Exception:
-                            st.warning("(No se pudo obtener feedback detallado del bloqueo)")
+                            if feedback: st.warning(f"Razón del bloqueo: {feedback}")
+                            elif response and hasattr(response, 'prompt_feedback'): st.warning(f"Feedback: {response.prompt_feedback}")
+                        except Exception: pass
                         generation_successful = False
 
                     except Exception as e:
+                        # Captura otros errores durante la generación
                         st.error(f"Ocurrió un error durante la generación de contenido: {e}")
                         if hasattr(e, 'message'): st.error(f"Detalle: {e.message}")
-                        try:
+                        try: # Intenta mostrar feedback si hubo respuesta parcial
                            if response and hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                              st.warning(f"Feedback del Prompt (puede indicar problemas): {response.prompt_feedback}")
+                              st.warning(f"Feedback del Prompt: {response.prompt_feedback}")
                         except Exception: pass
                         generation_successful = False # Marcar como fallida
 
-
-                # --- 3.3. Procesar Respuesta y Extraer JSON ---
+                # --- 3.3. Procesar Respuesta, Extraer JSON y Registrar en Google Sheets ---
                 if generation_successful and response:
                     st.write("Procesando respuesta del modelo...")
-                    # ... (El resto de la lógica de extracción de JSON permanece igual) ...
-                    try:
-                        response_text = response.text
-                        json_block = None
+                    json_block = None # Texto que potencialmente es JSON
+                    parsed_json = None # Diccionario Python si el parseo es exitoso
 
+                    try:
+                        # Intenta extraer el bloque JSON de la respuesta de texto
+                        response_text = response.text
                         start_marker = "```json"
                         end_marker = "```"
                         start_index = response_text.find(start_marker)
-                        if start_index != -1:
+
+                        if start_index != -1: # Si encuentra ```json
                             start_index += len(start_marker)
                             end_index = response_text.find(end_marker, start_index)
                             if end_index != -1:
                                 json_block = response_text[start_index:end_index].strip()
-                                st.write("JSON extraído usando delimitadores ```json.")
-                        else:
+                                # st.write("JSON extraído usando delimitadores ```json.") # Opcional
+                        else: # Si no, busca primer { y último }
                             json_start_index = response_text.find('{')
                             json_end_index = response_text.rfind('}')
                             if json_start_index != -1 and json_end_index != -1 and json_end_index > json_start_index:
                                 json_block = response_text[json_start_index : json_end_index + 1].strip()
-                                st.write("JSON extraído buscando primer '{' y último '}'.")
-                            else:
-                                json_block = response_text.strip()
-                                st.warning("No se detectó estructura JSON clara con ``` o {}. Usando respuesta completa como posible JSON.")
+                                # st.write("JSON extraído buscando primer '{' y último '}'.") # Opcional
+                        # Si nada funcionó, usa el texto completo como último recurso
+                        if not json_block:
+                            json_block = response_text.strip()
+                            st.warning("No se detectó estructura JSON clara. Usando respuesta completa.")
 
+                        # Intenta parsear el bloque extraído como JSON
                         try:
                             parsed_json = json.loads(json_block)
                             st.success("JSON extraído y validado exitosamente.")
 
+                            # --- INICIO: LÓGICA PARA REGISTRAR EN GOOGLE SHEETS ---
+                            if google_sheets_configured: # Solo si los secretos de Sheets están presentes
+                                st.write("Intentando registrar datos en Google Sheet...")
+                                try:
+                                    # 1. Preparar los datos para la fila de la hoja
+                                    # Obtener timestamp en zona horaria deseada
+                                    try:
+                                        tz = pytz.timezone('America/Caracas')
+                                        timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+                                    except Exception: # Fallback a UTC si pytz falla
+                                        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+
+                                    filename = uploaded_file.name if uploaded_file else "NO_FILENAME"
+                                    model_name_log = selected_model_name
+
+                                    # Extraer datos del JSON parseado (con valores por defecto seguros)
+                                    json_status = parsed_json.get("status", "NO_STATUS")
+                                    json_message = parsed_json.get("message", "NO_MESSAGE")
+                                    # Acceder de forma segura a la data anidada
+                                    data = parsed_json.get("data", {})
+                                    existing_mrs = data.get("existing-mrs", {}) if isinstance(data, dict) else {}
+
+                                    motivo_consulta = existing_mrs.get("MotivoConsulta", "")
+                                    enf_actual = existing_mrs.get("EnfermedadActual", "")
+                                    antecedentes = existing_mrs.get("Antecedentes", "")
+                                    exam_fisico = existing_mrs.get("ExamenFisico", "")
+                                    # Asegurar que días de reposo sea string para la hoja
+                                    dias_reposo = str(existing_mrs.get("DiasReposo", ""))
+                                    comentarios_modelo = existing_mrs.get("ComentariosModelo", "")
+                                    literal = existing_mrs.get("Literal", "")
+                                    # Convertir el JSON completo a string para guardarlo
+                                    json_completo_str = json.dumps(parsed_json, ensure_ascii=False, indent=2)
+
+                                    # Crear resúmenes para campos complejos (listas/dicts)
+                                    sv_data = existing_mrs.get("SignosVitales", {})
+                                    sv_resumen = "; ".join([f"{k}: {v}" for k, v in sv_data.items() if v not in [None, "NO_ENCONTRADO", ""]]) if isinstance(sv_data, dict) else ""
+
+                                    ex_data = existing_mrs.get("Examenes", [])
+                                    ex_resumen = "; ".join([f"{e.get('Name', '')}: {e.get('Resultado', '')}".strip(": ") for e in ex_data if isinstance(e, dict)]) if isinstance(ex_data, list) else ""
+
+                                    dx_data = existing_mrs.get("Diagnosticos", [])
+                                    dx_resumen = "; ".join([f"{d.get('Nombre', '')} ({d.get('ID', '')})".strip(" ()") for d in dx_data if isinstance(d, dict)]) if isinstance(dx_data, list) else ""
+
+                                    med_data = existing_mrs.get("Medicinas", [])
+                                    med_resumen = "; ".join([f"{m.get('Nombre', '')} {m.get('Presentacion', '')} {m.get('Dosis', '')}".strip() for m in med_data if isinstance(m, dict)]) if isinstance(med_data, list) else ""
+
+                                    plan_data = existing_mrs.get("PlanDeAccion", [])
+                                    # Extrae solo el valor (la instrucción) de cada dict en la lista
+                                    plan_resumen = "; ".join([list(p.values())[0] for p in plan_data if isinstance(p, dict) and len(p)==1 and list(p.values())[0]]) if isinstance(plan_data, list) else ""
+
+
+                                    # 2. Crear la lista de datos en el orden EXACTO de las columnas esperadas
+                                    row_data = [
+                                        timestamp, filename, model_name_log, json_status, json_message,
+                                        motivo_consulta, enf_actual, antecedentes, exam_fisico, dias_reposo,
+                                        sv_resumen, ex_resumen, dx_resumen,
+                                        med_resumen, # Columna 14
+                                        plan_resumen, comentarios_modelo, literal,
+                                        json_completo_str
+                                    ]
+
+                                    # 3. Validar longitud y Escribir en la hoja
+                                    if len(row_data) != len(EXPECTED_GSHEET_COLUMNS):
+                                        # Error crítico si el número de columnas no coincide
+                                        st.error(f"GSHEET Error: Discrepancia en número de columnas. Esperadas: {len(EXPECTED_GSHEET_COLUMNS)}, Generadas: {len(row_data)}. No se registrará.")
+                                    else:
+                                        # Conecta a Google Sheets
+                                        gc = connect_to_gsheet()
+                                        if gc:
+                                            # Obtiene la hoja de trabajo usando la URL
+                                            worksheet = get_worksheet(gc)
+                                            if worksheet:
+                                                # Añade la fila al final de la hoja
+                                                with st.spinner("Escribiendo registro en Google Sheet..."):
+                                                    worksheet.append_row(row_data, value_input_option='USER_ENTERED')
+                                                st.success("✅ ¡Registro agregado exitosamente a Google Sheet!")
+                                            else:
+                                                st.warning("GSHEET: No se pudo obtener la hoja de trabajo (verifica URL/Permisos). No se registró.")
+                                        else:
+                                             st.warning("GSHEET: No se pudo conectar con Google Sheets. No se registró.")
+
+                                except Exception as log_err:
+                                    # Captura errores durante el proceso de registro
+                                    st.error(f"GSHEET Error durante el proceso de registro: {log_err}")
+                                    st.exception(log_err) # Muestra traceback para depuración
+
+                            else: # Si google_sheets_configured es False
+                                st.warning("Registro en Google Sheet omitido porque faltan los secretos necesarios (JSON de credenciales o URL de la hoja).")
+                            # --- FIN: LÓGICA PARA GOOGLE SHEETS ---
+
+                            # Mostrar el JSON completo parseado en un expander
                             st.divider()
                             st.subheader("JSON Completo Recibido del Modelo")
                             with st.expander("Ver/Ocultar JSON completo", expanded=False):
@@ -292,105 +479,113 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             st.divider()
 
                         except json.JSONDecodeError as json_error:
-                            st.error(f"Error: El texto extraído NO es un JSON válido.")
-                            st.error(f"Detalle: {json_error}")
-                            st.text_area("Texto recibido del modelo (con error de JSON):", value=json_block, height=200)
-                            parsed_json = None
+                            # Error si el texto extraído no se pudo parsear como JSON
+                            st.error(f"Error: El texto extraído del modelo NO es un JSON válido.")
+                            st.error(f"Detalle del error: {json_error}")
+                            # Muestra el texto problemático para ayudar a identificar el error
+                            st.text_area("Texto recibido del modelo (con error de JSON):", value=json_block if json_block else response_text, height=200)
+                            parsed_json = None # Asegurar que parsed_json es None si falla
 
                     except AttributeError:
-                        st.error("Error: La respuesta del modelo no tiene el atributo 'text'.")
-                        st.write("Respuesta completa recibida:")
-                        st.write(response)
-                        parsed_json = None
+                         # Error si la respuesta del modelo no tiene el atributo .text
+                         st.error("Error: La respuesta del modelo no tiene el atributo 'text'.")
+                         st.write("Respuesta completa recibida:")
+                         st.write(response)
+                         parsed_json = None # Marcar como fallido
                     except Exception as proc_err:
+                        # Captura otros errores durante el procesamiento de la respuesta
                         st.error(f"Error procesando la respuesta del modelo: {proc_err}")
-                        parsed_json = None
+                        parsed_json = None # Marcar como fallido
 
                 elif not generation_successful:
-                    st.warning("La generación de contenido no fue exitosa o fue bloqueada.")
+                    # Mensaje si la generación falló o fue bloqueada
+                    st.warning("La generación de contenido no fue exitosa o fue bloqueada. No hay JSON para procesar.")
                 else: # response is None
+                    # Mensaje si no se recibió respuesta alguna
                      st.error("No se recibió respuesta del modelo.")
 
-
+        # --- Manejo de Errores Generales del Flujo ---
         except Exception as main_e:
-            st.error(f"Error en el flujo principal de procesamiento: {main_e}")
-            parsed_json = None
+            st.error(f"Ocurrió un error en el flujo principal de procesamiento: {main_e}")
+            st.exception(main_e) # Muestra el traceback completo para depuración
+            parsed_json = None # Asegurar que es None si hay error antes de mostrar resultados
 
         finally:
             # --- 3.4. Limpieza de Recursos (Archivo en Google AI) ---
+            # Intenta eliminar el archivo subido a Google AI para no acumular archivos
             if audio_file_ref and hasattr(audio_file_ref, 'name'):
                 try:
-                    with st.spinner(f"Limpiando archivo '{audio_file_ref.name}' de Google AI..."):
-                        genai.delete_file(audio_file_ref.name)
-                        st.write(f"Archivo temporal '{audio_file_ref.name}' eliminado de Google AI.")
+                    # No usar spinner aquí para no ocultar mensajes finales
+                    genai.delete_file(audio_file_ref.name)
+                    st.caption(f"Archivo temporal '{audio_file_ref.name}' eliminado de Google AI.")
                 except Exception as e_clean:
-                    st.warning(f"Error al eliminar archivo '{audio_file_ref.name}' de Google AI: {e_clean}. Puede requerir limpieza manual.")
+                    st.caption(f"Advertencia: No se pudo eliminar archivo '{audio_file_ref.name}' de Google AI: {e_clean}. Puede requerir limpieza manual.")
             elif google_upload_successful:
-                st.warning("No se pudo intentar eliminar el archivo de Google AI (falta referencia válida).")
+                 # Mensaje si la subida tuvo éxito pero no hay referencia para borrar
+                 st.caption("No se pudo intentar eliminar el archivo de Google AI (falta referencia válida).")
+
+            st.info("Proceso de análisis completado (revisa mensajes anteriores para posibles errores o advertencias).")
 
 
-            st.info("Proceso completado (con posibles errores indicados arriba).")
-
-
-        # --- 4. Mostrar Resultados (si el JSON fue parseado) ---
+        # --- 4. Mostrar Resultados del Procesamiento ---
         st.divider()
         st.subheader("3. Resultados del Procesamiento")
 
-        # ... (Toda la lógica para mostrar los resultados basada en `parsed_json` permanece exactamente igual) ...
+        # Solo muestra resultados si el JSON fue parseado exitosamente (parsed_json no es None)
         if parsed_json:
             try:
-                if parsed_json.get("status") == "OK" and "data" in parsed_json and "existing-mrs" in parsed_json["data"]:
+                # Verifica la estructura básica esperada del JSON
+                if parsed_json.get("status") == "OK" and "data" in parsed_json and isinstance(parsed_json.get("data"), dict) and "existing-mrs" in parsed_json["data"]:
                     informacion_medica = parsed_json["data"]["existing-mrs"]
-                    st.success("Mostrando información extraída:")
+                    st.success("Mostrando información médica extraída del audio:")
+
+                    # --- SECCIONES DE VISUALIZACIÓN (SIN CAMBIOS RESPECTO A TU CÓDIGO ORIGINAL) ---
 
                     # SECCION: Consulta (3 Columnas)
                     with st.expander("Detalles de la Consulta", expanded=True):
                         col_motivo, col_enf, col_ant = st.columns(3)
                         with col_motivo:
                             st.subheader("Motivo Consulta")
-                            st.text_area("MotivoConsulta", value=informacion_medica.get("MotivoConsulta", ""), height=200, label_visibility="collapsed", disabled=True, key="motivo_c")
+                            st.text_area("MotivoConsulta_disp", value=informacion_medica.get("MotivoConsulta", "No encontrado"), height=200, label_visibility="collapsed", disabled=True, key="motivo_c_disp")
                         with col_enf:
                             st.subheader("Enfermedad Actual")
-                            st.text_area("EnfermedadActual", value=informacion_medica.get("EnfermedadActual", ""), height=200, label_visibility="collapsed", disabled=True, key="enf_act")
+                            st.text_area("EnfermedadActual_disp", value=informacion_medica.get("EnfermedadActual", "No encontrado"), height=200, label_visibility="collapsed", disabled=True, key="enf_act_disp")
                         with col_ant:
                             st.subheader("Antecedentes")
-                            st.text_area("Antecedentes", value=informacion_medica.get("Antecedentes", ""), height=200, label_visibility="collapsed", disabled=True, key="antec")
+                            st.text_area("Antecedentes_disp", value=informacion_medica.get("Antecedentes", "No encontrado"), height=200, label_visibility="collapsed", disabled=True, key="antec_disp")
 
                     # SECCION: Examen Físico
                     with st.expander("Examen Físico"):
-                        st.text_area("ExamenFisico", value=informacion_medica.get("ExamenFisico", ""), height=150, label_visibility="collapsed", disabled=True, key="exam_fis")
+                        st.text_area("ExamenFisico_disp", value=informacion_medica.get("ExamenFisico", "No encontrado"), height=150, label_visibility="collapsed", disabled=True, key="exam_fis_disp")
 
-                    # SECCION: Signos Vitales
+                    # SECCION: Signos Vitales (Usando st.metric)
                     with st.expander("Signos Vitales"):
                         signos_vitales_data = informacion_medica.get("SignosVitales", {})
                         if isinstance(signos_vitales_data, dict) and signos_vitales_data:
                             num_sv = len(signos_vitales_data)
-                            cols_sv = st.columns(min(num_sv, 6)) # Max 6 columnas
+                            cols_sv = st.columns(min(num_sv, 6)) # Máximo 6 columnas para SV
                             i = 0
                             sv_order = ["TAS", "TAD", "FC", "PESO", "Size", "IMC"] # Orden preferido
                             displayed_keys = set()
-
+                            # Mostrar en orden preferido
                             for key in sv_order:
                                 if key in signos_vitales_data:
                                     value = signos_vitales_data[key]
+                                    display_value = str(value) if str(value).upper() != "NO_ENCONTRADO" and value is not None else "---"
                                     with cols_sv[i % min(num_sv, 6)]:
-                                        display_value = str(value) if str(value) != "NO_ENCONTRADO" and value is not None else "---"
                                         st.metric(label=key, value=display_value)
                                     displayed_keys.add(key)
                                     i += 1
-
+                            # Mostrar claves restantes
                             extra_keys = [k for k in signos_vitales_data if k not in displayed_keys]
                             for key in extra_keys:
                                 value = signos_vitales_data[key]
+                                display_value = str(value) if str(value).upper() != "NO_ENCONTRADO" and value is not None else "---"
                                 with cols_sv[i % min(num_sv, 6)]:
-                                    display_value = str(value) if str(value) != "NO_ENCONTRADO" and value is not None else "---"
                                     st.metric(label=key, value=display_value)
                                 i += 1
-                        elif isinstance(signos_vitales_data, dict) and not signos_vitales_data:
-                             st.info("No se encontraron datos de Signos Vitales.")
                         else:
-                            st.warning("Formato inesperado para SignosVitales en el JSON.")
-                            st.json(signos_vitales_data)
+                            st.info("No se encontraron datos de Signos Vitales.")
 
                     # SECCION: Exámenes
                     with st.expander("Exámenes Solicitados/Resultados"):
@@ -399,20 +594,15 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if examenes_data:
                                 for examen_dict in examenes_data:
                                     if isinstance(examen_dict, dict):
-                                        name = examen_dict.get("Name", "Nombre no especificado")
-                                        resultado = examen_dict.get("Resultado", "Resultado no especificado")
+                                        name = examen_dict.get("Name", "N/E")
+                                        resultado = examen_dict.get("Resultado", "N/E")
                                         unidad = examen_dict.get("UnidadMedida", "")
                                         display_text = f"- **{name}:** {resultado}"
-                                        if unidad and unidad != "NO_ENCONTRADO":
-                                            display_text += f" ({unidad})"
+                                        if unidad and str(unidad).upper() != "NO_ENCONTRADO": display_text += f" {unidad}"
                                         st.markdown(display_text)
-                                    else:
-                                        st.warning(f"Elemento inesperado en Examenes: {examen_dict}")
-                            else:
-                                st.info("No se especificaron exámenes.")
-                        else:
-                            st.warning("Formato inesperado para Examenes en el JSON.")
-                            st.json(examenes_data)
+                                    else: st.warning(f"Elemento inesperado en Examenes: {examen_dict}")
+                            else: st.info("No se especificaron exámenes.")
+                        else: st.warning(f"Formato inesperado para Examenes: {type(examenes_data)}")
 
                     # SECCION: Diagnósticos
                     with st.expander("Diagnósticos"):
@@ -421,19 +611,14 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if diagnosticos_data:
                                 for diag_dict in diagnosticos_data:
                                     if isinstance(diag_dict, dict):
-                                        nombre_diag = diag_dict.get("Nombre", "Nombre no especificado")
+                                        nombre_diag = diag_dict.get("Nombre", "N/E")
                                         diag_id = diag_dict.get("ID", "")
                                         display_text = f"- **{nombre_diag}**"
-                                        if diag_id and diag_id.strip() and diag_id.upper() != "NO_ENCONTRADO":
-                                            display_text += f" (ID: {diag_id})"
+                                        if diag_id and str(diag_id).strip().upper() != "NO_ENCONTRADO": display_text += f" (ID: {diag_id})"
                                         st.markdown(display_text)
-                                    else:
-                                        st.warning(f"Elemento inesperado en Diagnosticos: {diag_dict}")
-                            else:
-                                st.info("No se especificaron diagnósticos.")
-                        else:
-                            st.warning("Formato inesperado para Diagnosticos en el JSON.")
-                            st.json(diagnosticos_data)
+                                    else: st.warning(f"Elemento inesperado en Diagnosticos: {diag_dict}")
+                            else: st.info("No se especificaron diagnósticos.")
+                        else: st.warning(f"Formato inesperado para Diagnosticos: {type(diagnosticos_data)}")
 
                     # SECCION: Medicamentos
                     with st.expander("Medicamentos Indicados"):
@@ -442,20 +627,15 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                             if medicamentos_data:
                                 for i, med_dict in enumerate(medicamentos_data):
                                     if isinstance(med_dict, dict):
-                                        nombre = med_dict.get("Nombre", f"Medicamento {i+1}")
-                                        presentacion = med_dict.get("Presentacion", "No especificada")
-                                        dosis = med_dict.get("Dosis", "No especificada")
-                                        med_title = f"**{nombre}** ({presentacion})"
-                                        st.markdown(med_title)
-                                        st.text_area(f"Dosis_{i}", value=dosis, key=f"med_dosis_{i}", height=80, label_visibility="collapsed", disabled=True)
-                                        st.divider()
-                                    else:
-                                        st.warning(f"Elemento inesperado en Medicinas: {med_dict}")
-                            else:
-                                st.info("No se especificaron medicamentos.")
-                        else:
-                            st.warning("Formato inesperado para Medicinas en el JSON.")
-                            st.json(medicamentos_data)
+                                        nombre = med_dict.get("Nombre", f"Med_{i+1}")
+                                        presentacion = med_dict.get("Presentacion", "")
+                                        dosis = med_dict.get("Dosis", "N/E")
+                                        st.markdown(f"**{nombre}** {f'({presentacion})' if presentacion else ''}")
+                                        st.text_area(f"Dosis_{i}_disp", value=dosis, key=f"med_dosis_disp_{i}", height=68, label_visibility="collapsed", disabled=True)
+                                        if i < len(medicamentos_data) - 1: st.divider() # Separador entre meds
+                                    else: st.warning(f"Elemento inesperado en Medicinas: {med_dict}")
+                            else: st.info("No se especificaron medicamentos.")
+                        else: st.warning(f"Formato inesperado para Medicinas: {type(medicamentos_data)}")
 
                     # SECCION: Plan de Acción
                     with st.expander("Plan de Acción"):
@@ -463,94 +643,74 @@ if st.button("2. Procesar Audio y Generar Información", disabled=not api_key_co
                         if isinstance(plan_data, list):
                             if plan_data:
                                 items_markdown = []
-                                valid_items_found = False
                                 for item_dict in plan_data:
                                     if isinstance(item_dict, dict) and len(item_dict) == 1:
-                                        try:
-                                            numero_consecutivo = list(item_dict.keys())[0]
-                                            instruccion = list(item_dict.values())[0]
-                                            try:
-                                                num_val = int(numero_consecutivo)
-                                                items_markdown.append(f"{num_val}. {instruccion}")
-                                                valid_items_found = True
-                                            except ValueError:
-                                                st.warning(f"Ítem en PlanDeAccion con clave no numérica: '{numero_consecutivo}'. Mostrando como texto:")
-                                                st.markdown(f"- {instruccion}")
-                                        except IndexError:
-                                            st.warning("Se encontró un diccionario vacío en PlanDeAccion.")
-                                    else:
-                                        st.warning(f"Elemento inesperado en PlanDeAccion: {item_dict}. Mostrando como texto:")
-                                        if isinstance(item_dict, str):
-                                            st.markdown(f"- {item_dict}")
-                                        elif isinstance(item_dict, dict):
-                                            st.markdown(f"- {item_dict}") # Mostrar dict como texto
+                                        instruccion = list(item_dict.values())[0]
+                                        if instruccion: items_markdown.append(f"- {instruccion}")
+                                    elif isinstance(item_dict, str) and item_dict: # Acepta strings directamente
+                                        items_markdown.append(f"- {item_dict}")
+                                if items_markdown: st.markdown("\n".join(items_markdown))
+                                else: st.info("Plan de acción vacío o con formato no reconocido.")
+                            else: st.info("No se especificó plan de acción.")
+                        elif isinstance(plan_data, str) and plan_data: # Acepta string simple
+                             st.markdown(f"Plan: {plan_data}")
+                        else: st.warning(f"Formato inesperado o vacío para PlanDeAccion: {type(plan_data)}")
 
-                                if valid_items_found:
-                                    st.markdown("\n".join(items_markdown))
-                                elif not plan_data:
-                                    st.info("No se especificó plan de acción en el JSON (lista vacía).")
-                                else:
-                                    st.info("No se encontraron instrucciones numeradas válidas en PlanDeAccion.")
-                            else:
-                                st.info("No se especificó plan de acción en el JSON (lista vacía).")
-                        elif isinstance(plan_data, str) and plan_data:
-                            st.markdown(f"Plan: {plan_data}")
-                        else:
-                            st.warning("Formato inesperado para PlanDeAccion o está vacío.")
-                            if not isinstance(plan_data, (list, str)):
-                                st.json(plan_data)
 
                     # SECCION: Días de Reposo
                     with st.expander("Indicación de Reposo"):
-                        dias_reposo_val = informacion_medica.get("DiasReposo", "NO_ENCONTRADO")
-                        if dias_reposo_val != "NO_ENCONTRADO":
-                             if str(dias_reposo_val).isdigit():
+                        dias_reposo_val = str(informacion_medica.get("DiasReposo", "NO_ENCONTRADO"))
+                        if dias_reposo_val.upper() != "NO_ENCONTRADO" and dias_reposo_val.strip():
+                             if dias_reposo_val.isdigit():
                                 st.metric("Días de Reposo Indicados", value=dias_reposo_val)
-                             else:
+                             else: # Si no es número, muestra el texto
                                 st.write(f"Indicación: {dias_reposo_val}")
                         else:
                             st.info("No se especificó indicación de reposo.")
 
                     # SECCION: Comentarios y Literal
-                    with st.expander("Comentarios del Modelo y Transcripción Completa", expanded=True):
+                    with st.expander("Comentarios del Modelo y Transcripción Completa", expanded=False): # Inicia cerrado
                         col_comm, col_lit = st.columns(2)
                         with col_comm:
                             st.subheader("Comentarios del Modelo")
-                            comentarios_modelo_val = informacion_medica.get("ComentariosModelo", "")
-                            st.text_area("Comentarios", value=comentarios_modelo_val, height=300, label_visibility="collapsed", disabled=True, key="comm_mod")
+                            st.text_area("Comentarios_disp", value=informacion_medica.get("ComentariosModelo", ""), height=300, label_visibility="collapsed", disabled=True, key="comm_mod_disp")
                         with col_lit:
                             st.subheader("Transcripción Literal")
-                            literal_val = informacion_medica.get("Literal", "")
-                            st.text_area("Literal", value=literal_val, height=300, label_visibility="collapsed", disabled=True, key="lit_tx")
+                            st.text_area("Literal_disp", value=informacion_medica.get("Literal", "Transcripción no encontrada en el JSON"), height=300, label_visibility="collapsed", disabled=True, key="lit_tx_disp")
 
+                # Mensaje si el JSON se parseó pero no tiene la estructura esperada
                 elif parsed_json and "message" in parsed_json:
-                    st.error(f"Error en la respuesta JSON recibida del modelo: {parsed_json.get('message', 'Mensaje no encontrado')}")
-                    st.json(parsed_json)
+                    st.error(f"Error en la respuesta JSON del modelo: {parsed_json.get('message', 'Mensaje no encontrado')}")
                 else:
                     st.error("El JSON generado por el modelo no tiene la estructura esperada (status, data, existing-mrs).")
-                    st.json(parsed_json if parsed_json else {"error": "No se pudo parsear JSON"})
+                    # st.json(parsed_json if parsed_json else {"error": "No se pudo parsear JSON"}) # Opcional
 
             except Exception as display_e:
+                # Error durante la visualización de los datos del JSON
                 st.error(f"Ocurrió un error al mostrar los datos del JSON: {display_e}")
-                st.exception(display_e)
-                st.write("JSON problemático:")
-                st.json(parsed_json)
+                st.exception(display_e) # Muestra traceback completo
+                # st.write("JSON problemático:") # Opcional
+                # st.json(parsed_json)
 
-        elif generation_successful:
+        # Mensajes si no hay JSON para mostrar
+        elif generation_successful: # La generación fue exitosa pero el parseo falló
              st.error("No se pudo mostrar la información porque el JSON generado por el modelo no es válido o no se pudo extraer.")
-        else:
+        else: # La generación misma falló
             st.warning("No hay información para mostrar debido a errores en pasos anteriores (subida, generación, etc.).")
 
+    # Mensajes si el botón se presionó pero faltaban requisitos
     elif not uploaded_file:
         st.warning("Por favor, sube un archivo de audio primero.")
     elif not api_key_configured:
-         st.error("La API Key no está configurada. No se puede procesar.")
+         st.error("La API Key de Gemini no está configurada. No se puede procesar.")
 
 # --- Sección Opcional: Hora Actual ---
 st.divider()
 try:
-    tz = pytz.timezone('America/Caracas') # Cambia a tu zona horaria si es necesario
+    # Intenta obtener hora local de Caracas
+    tz = pytz.timezone('America/Caracas')
     current_time_str = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S %Z%z')
-except Exception:
-    current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + " (Local/UTC)"
+except Exception as tz_error:
+    # Si falla (ej. pytz no instalado), usa hora local del servidor o UTC
+    current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + f" (Local/UTC? Error: {tz_error})"
 st.caption(f"Hora actual: {current_time_str}")
