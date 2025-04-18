@@ -218,7 +218,7 @@ uploaded_file = st.file_uploader(
 st.divider()
 st.subheader("1.5. Selecciona el Modelo de IA")
 # Define los modelos disponibles
-model_options = ['gemini-2.5-pro-exp-03-25', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest']
+model_options = ['gemini-2.5-pro-exp-03-25', 'gemini-2.5-flash-preview-04-17','gemini-1.5-flash-latest', 'gemini-1.5-pro-latest']
 selected_model_name = st.selectbox(
     "Elige el modelo de IA Generativa:",
     options=model_options,
