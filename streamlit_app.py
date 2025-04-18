@@ -713,4 +713,9 @@ try:
 except Exception as tz_error:
     # Si falla (ej. pytz no instalado), usa hora local del servidor o UTC
     current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + f" (Local/UTC? Error: {tz_error})"
-st.caption(f"Hora actual: {current_time_str}")
+
+col1, col2 = st.columns([1, 1])
+with col1:
+    st.caption(f"Hora actual: {current_time_str}")
+with col2:
+    st.link_button("Ver Historial", "https://docs.google.com/spreadsheets/d/1Unu2MvvBszTVlOz9eu_NPwOBea3xf6R4H9n9vYIoS-w/edit?usp=sharing")
